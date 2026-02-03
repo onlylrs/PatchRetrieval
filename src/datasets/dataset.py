@@ -12,8 +12,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from .stain_normalization import StainNormalizer
-
 
 class CCSRetrievalDataset(Dataset):
     """
@@ -35,9 +33,6 @@ class CCSRetrievalDataset(Dataset):
         query_image_paths: Optional[list[str]] = None,
         image_size: int = 224,
         num_negatives: int = 7,
-        use_stain_norm: bool = False,
-        stain_norm_method: str = "macenko",
-        stain_norm_target: Optional[str] = None,
     ):
         """
         Initialize dataset.
@@ -49,16 +44,12 @@ class CCSRetrievalDataset(Dataset):
             query_image_paths: List of paths to query cell images
             image_size: Size to resize images to
             num_negatives: Number of negative samples per positive
-            use_stain_norm: Whether to apply stain normalization
-            stain_norm_method: Stain normalization method ("macenko" or "reinhard")
-            stain_norm_target: Path to target image for normalization (optional)
         """
         self.processed_data_dir = Path(processed_data_dir)
         self.category = category
         self.split = split
         self.image_size = image_size
         self.num_negatives = num_negatives
-        self.use_stain_norm = use_stain_norm
         
         # Load positive and negative patch lists
         cat_dir = self.processed_data_dir / category
@@ -95,22 +86,7 @@ class CCSRetrievalDataset(Dataset):
         # Query image paths (lazy loading, not cached in memory)
         self.query_image_paths = query_image_paths or []
         
-        # Initialize stain normalizer if enabled
-        self.stain_normalizer = None
-        if use_stain_norm:
-            try:
-                self.stain_normalizer = StainNormalizer(
-                    method=stain_norm_method,
-                    target_image_path=stain_norm_target,
-                    backend="auto",
-                )
-                print(f"Stain normalization enabled: {stain_norm_method}")
-            except Exception as e:
-                print(f"Warning: Failed to initialize stain normalizer: {e}")
-                print("Continuing without stain normalization.")
-                self.stain_normalizer = None
-        
-        # Image transforms (applied AFTER stain normalization)
+        # Image transforms
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
@@ -126,11 +102,6 @@ class CCSRetrievalDataset(Dataset):
     def _load_query(self, path: str) -> torch.Tensor:
         """Load and transform a query image."""
         img = Image.open(path).convert("RGB")
-        
-        # Apply stain normalization if enabled
-        if self.stain_normalizer is not None:
-            img = self.stain_normalizer.normalize(img)
-        
         return self.transform(img)
     
     def get_random_query(self) -> torch.Tensor:
@@ -145,11 +116,6 @@ class CCSRetrievalDataset(Dataset):
         """Load and transform a patch image."""
         path = self.patch_name_to_path[patch_name]
         img = Image.open(path).convert("RGB")
-        
-        # Apply stain normalization if enabled
-        if self.stain_normalizer is not None:
-            img = self.stain_normalizer.normalize(img)
-        
         return self.transform(img)
     
     def __getitem__(self, idx: int) -> dict:
@@ -232,9 +198,6 @@ class CCSEvalDataset(Dataset):
         split: str = "test",
         query_image_paths: Optional[list[str]] = None,
         image_size: int = 224,
-        use_stain_norm: bool = False,
-        stain_norm_method: str = "macenko",
-        stain_norm_target: Optional[str] = None,
     ):
         """
         Initialize evaluation dataset.
@@ -245,15 +208,11 @@ class CCSEvalDataset(Dataset):
             split: One of "train", "val", "test"
             query_image_paths: List of paths to query cell images
             image_size: Size to resize images to
-            use_stain_norm: Whether to apply stain normalization
-            stain_norm_method: Stain normalization method ("macenko" or "reinhard")
-            stain_norm_target: Path to target image for normalization (optional)
         """
         self.processed_data_dir = Path(processed_data_dir)
         self.category = category
         self.split = split
         self.image_size = image_size
-        self.use_stain_norm = use_stain_norm
         
         # Load all patch names for this split
         with open(self.processed_data_dir / "splits.json", "r") as f:
@@ -276,21 +235,6 @@ class CCSEvalDataset(Dataset):
         self.query_image_paths = query_image_paths or []
         self._query_images = None
         
-        # Initialize stain normalizer if enabled
-        self.stain_normalizer = None
-        if use_stain_norm:
-            try:
-                self.stain_normalizer = StainNormalizer(
-                    method=stain_norm_method,
-                    target_image_path=stain_norm_target,
-                    backend="auto",
-                )
-                print(f"Stain normalization enabled: {stain_norm_method}")
-            except Exception as e:
-                print(f"Warning: Failed to initialize stain normalizer: {e}")
-                print("Continuing without stain normalization.")
-                self.stain_normalizer = None
-        
         # Image transforms
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
@@ -310,11 +254,6 @@ class CCSEvalDataset(Dataset):
             self._query_images = []
             for path in self.query_image_paths:
                 img = Image.open(path).convert("RGB")
-                
-                # Apply stain normalization if enabled
-                if self.stain_normalizer is not None:
-                    img = self.stain_normalizer.normalize(img)
-                
                 self._query_images.append(self.transform(img))
         return self._query_images
     
@@ -343,10 +282,6 @@ class CCSEvalDataset(Dataset):
         path = self.patch_name_to_path[patch_name]
         
         img = Image.open(path).convert("RGB")
-        
-        # Apply stain normalization if enabled
-        if self.stain_normalizer is not None:
-            img = self.stain_normalizer.normalize(img)
         
         patch = self.transform(img)
         

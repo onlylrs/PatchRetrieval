@@ -35,8 +35,6 @@ def parse_args():
         "--config",
         type=str,
         default=str(ROOT_DIR / "configs/default.yaml"),
-        type=str,
-        default=None,
         help="Path to config file (if not in checkpoint directory)",
     )
     parser.add_argument(
@@ -95,11 +93,11 @@ def parse_args():
         default=None,
         help="Path to save evaluation results",
     )
-    parser.add_argument(
-        "--share_weights",
-        action="store_true",
-        help="Use shared weights between query and patch encoders",
-    )
+    # parser.add_argument(
+    #     "--share_weights",
+    #     action="store_true",
+    #     help="Use shared weights between query and patch encoders",
+    # )
     parser.add_argument(
         "--aggregation",
         type=str,
@@ -255,9 +253,6 @@ def main():
         split=args.split,
         query_image_paths=query_images,
         image_size=config["data"]["image_size"],
-        use_stain_norm=config["data"].get("use_stain_norm", False),
-        stain_norm_method=config["data"].get("stain_norm_method", "macenko"),
-        stain_norm_target=config["data"].get("stain_norm_target"),
     )
     
     dataloader = DataLoader(
@@ -276,9 +271,12 @@ def main():
     # Create model
     print("\nLoading model...")
     pooling_method = config["model"].get("pooling_method", "softmax_attn")
+    share_weights = config["model"].get("share_weights", False)
+    print(f"Share weights: {share_weights}")
+
     model = PatchRetrievalModel(
         model_name=config["model"]["backbone"],
-        share_weights=args.share_weights,
+        share_weights=share_weights,
         pooling_method=pooling_method,
         cache_dir=config["model"]["cache_dir"],
     )

@@ -42,19 +42,14 @@ def parse_args():
         required=True,
         help="Target category (e.g., HSIL)",
     )
+    
     parser.add_argument(
-        "--query_images",
-        type=str,
-        nargs="+",
-        required=True,
-        help="Path(s) to query cell image(s), or 'all' to load all from queries_dir/{category}/",
-    )
-    parser.add_argument(
-        "--queries_dir",
+        "--queries_root",
         type=str,
         default=None,
-        help="Root directory for query images (used when --query_images is 'all')",
+        help="Override config: Root directory for query images",
     )
+    
     parser.add_argument(
         "--processed_data_dir",
         type=str,
@@ -80,7 +75,7 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--num_negatives", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--share_weights", action="store_true")
+    # parser.add_argument("--share_weights", action="store_true") # Moved to config
     
     return parser.parse_args()
 
@@ -91,38 +86,38 @@ def load_config(config_path: str) -> dict:
 
 
 def resolve_query_images(
-    query_images: list[str], 
-    queries_dir: str, 
+    queries_root: str,
     category: str,
 ) -> list[str]:
     """
-    Resolve query image paths.
-    
-    If query_images is ['all'], load all images from queries_dir/{category}/.
-    Training will dynamically sample from this pool each batch.
-    Otherwise, return the paths as-is.
+    Resolve query image paths from queries_root/category.
     """
-    if len(query_images) == 1 and query_images[0].lower() == "all":
-        category_dir = Path(queries_dir) / category
-        if not category_dir.exists():
-            raise ValueError(f"Query directory not found: {category_dir}")
+    if not queries_root:
+        raise ValueError("queries_root is not specified")
         
-        image_extensions = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
-        image_paths = []
-        for ext in image_extensions:
-            image_paths.extend(category_dir.glob(f"*{ext}"))
-            image_paths.extend(category_dir.glob(f"*{ext.upper()}"))
+    queries_root = Path(queries_root)
+    
+    # Check absolute or relative to ROOT_DIR
+    if not queries_root.is_absolute():
+        queries_root = ROOT_DIR / queries_root
         
-        if not image_paths:
-            raise ValueError(f"No images found in {category_dir}")
-        
-        image_paths = sorted([str(p) for p in image_paths])
-        print(f"Found {len(image_paths)} query images in {category_dir}")
-        print("Training will randomly sample from this pool each batch.")
-        
-        return image_paths
-    else:
-        return query_images
+    category_dir = queries_root / category
+    if not category_dir.exists():
+        raise ValueError(f"Query directory not found: {category_dir}")
+    
+    image_extensions = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+    image_paths = []
+    for ext in image_extensions:
+        image_paths.extend(category_dir.glob(f"*{ext}"))
+        image_paths.extend(category_dir.glob(f"*{ext.upper()}"))
+    
+    if not image_paths:
+        raise ValueError(f"No images found in {category_dir}")
+    
+    image_paths = sorted([str(p) for p in image_paths])
+    print(f"Found {len(image_paths)} query images in {category_dir}")
+    
+    return image_paths
 
 
 def create_dataloaders(
@@ -133,9 +128,6 @@ def create_dataloaders(
     num_negatives: int,
     image_size: int,
     num_workers: int,
-    use_stain_norm: bool = False,
-    stain_norm_method: str = "macenko",
-    stain_norm_target: str = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Create training and validation dataloaders."""
     
@@ -146,9 +138,6 @@ def create_dataloaders(
         query_image_paths=query_images,
         image_size=image_size,
         num_negatives=num_negatives,
-        use_stain_norm=use_stain_norm,
-        stain_norm_method=stain_norm_method,
-        stain_norm_target=stain_norm_target,
     )
     
     val_dataset = CCSRetrievalDataset(
@@ -158,9 +147,6 @@ def create_dataloaders(
         query_image_paths=query_images,
         image_size=image_size,
         num_negatives=num_negatives,
-        use_stain_norm=use_stain_norm,
-        stain_norm_method=stain_norm_method,
-        stain_norm_target=stain_norm_target,
     )
     
     train_loader = DataLoader(
@@ -428,13 +414,11 @@ def main():
     
     # Use config defaults if not specified
     processed_data_dir = args.processed_data_dir or config["data"]["processed_data_dir"]
-    queries_dir = args.queries_dir or config["data"]["queries_dir"]
-    
+    queries_root = args.queries_root or config["data"].get("queries_root", "data/queries")
+
     # Resolve paths relative to ROOT_DIR if not absolute
     if processed_data_dir and not Path(processed_data_dir).is_absolute():
         processed_data_dir = str(ROOT_DIR / processed_data_dir)
-    if queries_dir and not Path(queries_dir).is_absolute():
-        queries_dir = str(ROOT_DIR / queries_dir)
     
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -449,8 +433,9 @@ def main():
     with open(output_dir / "config.yaml", "w") as f:
         yaml.dump(config, f)
     
-    # Resolve query images (training will dynamically sample from this pool)
-    query_images = resolve_query_images(args.query_images, queries_dir, args.category)
+    # Resolve query images
+    query_images = resolve_query_images(queries_root, args.category)
+    
     
     # Create dataloaders
     print("Creating dataloaders...")
@@ -464,9 +449,6 @@ def main():
         num_negatives=config["training"]["num_negatives"],
         image_size=config["data"]["image_size"],
         num_workers=args.num_workers,
-        use_stain_norm=config["data"].get("use_stain_norm", False),
-        stain_norm_method=config["data"].get("stain_norm_method", "macenko"),
-        stain_norm_target=config["data"].get("stain_norm_target"),
     )
     
     print(f"Train samples: {len(train_loader.dataset)}")
@@ -475,12 +457,14 @@ def main():
     # Create model
     print("Creating model...")
     pooling_method = config["model"].get("pooling_method", "softmax_attn")
+    share_weights = config["model"].get("share_weights", False)
     print(f"Using backbone: {config['model']['backbone']}")
     print(f"Pooling method: {pooling_method}")
+    print(f"Share weights: {share_weights}")
     
     model = PatchRetrievalModel(
         model_name=config["model"]["backbone"],
-        share_weights=args.share_weights,
+        share_weights=share_weights,
         pooling_method=pooling_method,
         init_temperature=config["training"]["init_temperature"],
         min_temperature=config["training"]["min_temperature"],
