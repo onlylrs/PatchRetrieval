@@ -1,0 +1,102 @@
+# PatchRetrieval Configuration for CCS Dataset
+
+# Data settings
+data:
+  # CCS dataset paths
+  cell_cls_root: "/ssddata/hjiangaz/rliuar/1_Research/CCS-Cell-Cls"
+  cell_det_root: "/ssddata/hjiangaz/rliuar/1_Research/CCS-Cell-Det"
+  processed_data_dir: "data/derived"
+  
+  # Query images directory (for --query_images all)
+  # Points to CELL_DATA so you can directly use cell images as queries
+  queries_dir: "/ssddata/hjiangaz/rliuar/1_Research/CCS-Cell-Cls/CELL_DATA"
+  
+  # Image settings
+  # Note: Should match the model's expected input size
+  # CLIP: 224, SigLIP2-256: 256, SigLIP2-384: 384, DINOv3: 224
+  image_size: 224  # resize images to this size for ViT
+  
+  # Stain normalization (color normalization for pathology images)
+  use_stain_norm: false  # Enable stain normalization
+  stain_norm_method: "macenko"  # "macenko" or "reinhard"
+  stain_norm_target: null  # Path to target/reference image (optional, uses first image if null)
+  
+  # Data split (for preprocessing)
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+  seed: 42
+
+# Target categories (in severity order, low to high)
+categories:
+  - "ASC-US"
+  - "LSIL"
+  - "ASC-H"
+  - "HSIL"
+  - "SCC"
+
+# Severity mapping (higher = more severe, for reference)
+severity:
+  ASC-US: 1
+  LSIL: 2
+  ASC-H: 3
+  HSIL: 4
+  SCC: 5
+
+# Model settings
+model:
+  # Backbone options:
+  #   CLIP: "openai/clip-vit-base-patch16", "openai/clip-vit-large-patch14"
+  #   SigLIP2: "google/siglip2-base-patch16-224", "google/siglip2-large-patch16-256",
+  #            "google/siglip2-so400m-patch14-384", etc.
+  #   (See https://huggingface.co/collections/google/siglip2-67b5dcef38c175486e240107)
+  #   DINOv3: "facebook/dinov3-vits16-pretrain-lvd1689m", "facebook/dinov3-vitb16-pretrain-lvd1689m",
+  #           "facebook/dinov3-vitl16-pretrain-lvd1689m", "facebook/dinov3-vitg16-pretrain-lvd1689m",
+  #           "facebook/dinov3-vitsplus-pretrain-lvd1689m", "facebook/dinov3-vit7b16-pretrain-lvd1689m"
+  #   (See https://huggingface.co/collections/facebook/dinov3-68924841bd6b561778e31009)
+  #   DINOv3 (local): "/ssddata/hjiangaz/rliuar/0_Official/huggingface/hub/dinov3-vitb16-pretrain-lvd1689m"
+  backbone: "/ssddata/hjiangaz/rliuar/0_Official/huggingface/hub/dinov3-vitb16-pretrain-lvd1689m"
+  embed_dim: 768
+  cache_dir: "/ssddata/hjiangaz/rliuar/0_Official/huggingface/hub"
+  
+  # Pooling method for patch-query similarity
+  # Options: "softmax_attn" (attention weighted), "mean" (average), "max" (maximum)
+  pooling_method: "softmax_attn"
+
+# Training settings
+training:
+  batch_size: 48
+  num_epochs: 10
+  learning_rate: 0.00003  # 2e-5
+  weight_decay: 0.01
+  warmup_epochs: 1
+  num_negatives: 15
+  
+  # Temperature (learnable)
+  init_temperature: 0.07
+  min_temperature: 0.01
+  max_temperature: 1.0
+  
+  # Ordinal contrastive loss: adds margin to negative similarities based on pathology severity
+  # small severity distance -> large margin (pushes "similar" negatives further away)
+  # Set to 0.0 to disable, suggested: 0.1-0.3
+  ordinal_margin_base: 0.2
+  
+  # Optimizer
+  optimizer: "adamw"
+  betas: [0.9, 0.999]
+  
+  # Scheduler
+  scheduler: "cosine"
+  
+  # Checkpointing
+  save_every: 3
+  save_best: true
+  # Metric to use for saving best model: "loss" (lower is better) or "mAP" (higher is better)
+  save_best_metric: "loss"
+
+# Logging
+logging:
+  log_dir: "logs"
+  tensorboard: true
+  log_every: 10

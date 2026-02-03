@@ -1,0 +1,81 @@
+{
+  "categories": {
+    "ASC-US": {
+      "train": {
+        "positives": 12315,
+        "negatives": 10259
+      },
+      "val": {
+        "positives": 1752,
+        "negatives": 1472
+      },
+      "test": {
+        "positives": 3532,
+        "negatives": 2919
+      }
+    },
+    "LSIL": {
+      "train": {
+        "positives": 9195,
+        "negatives": 13379
+      },
+      "val": {
+        "positives": 1343,
+        "negatives": 1881
+      },
+      "test": {
+        "positives": 2653,
+        "negatives": 3798
+      }
+    },
+    "ASC-H": {
+      "train": {
+        "positives": 3862,
+        "negatives": 18712
+      },
+      "val": {
+        "positives": 569,
+        "negatives": 2655
+      },
+      "test": {
+        "positives": 1104,
+        "negatives": 5347
+      }
+    },
+    "HSIL": {
+      "train": {
+        "positives": 4067,
+        "negatives": 18507
+      },
+      "val": {
+        "positives": 582,
+        "negatives": 2642
+      },
+      "test": {
+        "positives": 1154,
+        "negatives": 5297
+      }
+    },
+    "SCC": {
+      "train": {
+        "positives": 217,
+        "negatives": 22357
+      },
+      "val": {
+        "positives": 27,
+        "negatives": 3197
+      },
+      "test": {
+        "positives": 53,
+        "negatives": 6398
+      }
+    }
+  },
+  "total_patches": 32249,
+  "total_cells": 75073,
+  "splits": {
+    "train": 22574,
+    "val": 3224,
+    "test": 6451
+  }
+}
