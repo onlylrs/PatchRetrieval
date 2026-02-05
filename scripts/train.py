@@ -8,6 +8,7 @@ import sys
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # Add project root to path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -41,6 +42,13 @@ def parse_args():
         type=str,
         required=True,
         help="Target category (e.g., HSIL)",
+    )
+    
+    parser.add_argument(
+        "--exp_name",
+        type=str,
+        default=None,
+        help="Experiment name for output directory (default: timestamp)",
     )
     
     parser.add_argument(
@@ -128,6 +136,8 @@ def create_dataloaders(
     num_negatives: int,
     image_size: int,
     num_workers: int,
+    use_augmentation: bool = True,
+    augmentation_config: Optional[dict] = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Create training and validation dataloaders."""
     
@@ -138,6 +148,8 @@ def create_dataloaders(
         query_image_paths=query_images,
         image_size=image_size,
         num_negatives=num_negatives,
+        use_augmentation=use_augmentation,
+        augmentation_config=augmentation_config,
     )
     
     val_dataset = CCSRetrievalDataset(
@@ -147,6 +159,8 @@ def create_dataloaders(
         query_image_paths=query_images,
         image_size=image_size,
         num_negatives=num_negatives,
+        use_augmentation=False,  # Never augment validation
+        augmentation_config=augmentation_config,
     )
     
     train_loader = DataLoader(
@@ -221,14 +235,23 @@ def train_epoch(
     epoch: int,
     writer: SummaryWriter,
     log_every: int = 10,
+    config: dict = None,
+    val_loader: DataLoader = None,
+    best_metric_info: dict = None,
+    output_dir: Path = None,
 ) -> dict:
-    """Train for one epoch."""
+    """Train for one epoch with optional step-based validation."""
     
     model.train()
     
     total_loss = 0.0
     total_accuracy = 0.0
     num_batches = 0
+    
+    # Validation strategy
+    val_strategy = config.get("training", {}).get("val_strategy", "epoch") if config else "epoch"
+    val_every_steps = config.get("training", {}).get("val_every_steps", 500) if config else 500
+    save_best_metric = config.get("training", {}).get("save_best_metric", "loss") if config else "loss"
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
     
@@ -243,7 +266,7 @@ def train_epoch(
         outputs = model.compute_contrastive_loss(
             query, positive, negatives, 
             query_ranks=query_rank, 
-            negative_ranks=negative_ranks
+            negative_ranks=negative_ranks,
         )
         loss = outputs["loss"]
         
@@ -256,20 +279,56 @@ def train_epoch(
         total_accuracy += outputs["accuracy"].item()
         num_batches += 1
         
-        pbar.set_postfix({
+        postfix = {
             "loss": f"{loss.item():.4f}",
             "acc": f"{outputs['accuracy'].item():.4f}",
             "temp": f"{outputs['temperature'].item():.4f}",
-        })
+        }
+        pbar.set_postfix(postfix)
         
         global_step = epoch * len(train_loader) + batch_idx
         if batch_idx % log_every == 0:
             writer.add_scalar("train/loss", loss.item(), global_step)
+            writer.add_scalar("train/contrastive_loss", outputs["contrastive_loss"].item(), global_step)
             writer.add_scalar("train/accuracy", outputs["accuracy"].item(), global_step)
             writer.add_scalar("train/temperature", outputs["temperature"].item(), global_step)
             writer.add_scalar("train/pos_similarity", outputs["pos_similarity"].item(), global_step)
             writer.add_scalar("train/neg_similarity", outputs["neg_similarity"].item(), global_step)
             writer.add_scalar("train/learning_rate", scheduler.get_last_lr()[0], global_step)
+        
+        # Step-based validation
+        if val_strategy == "step" and val_loader is not None and best_metric_info is not None:
+            if global_step > 0 and global_step % val_every_steps == 0:
+                print(f"\n\nRunning validation at step {global_step}...")
+                val_metrics = validate(model, val_loader, device, epoch, writer, compute_map=True)
+                
+                # Check if this is the best model
+                current_metric = val_metrics.get("mAP", 0.0) if save_best_metric == "mAP" else val_metrics["loss"]
+                metric_improved_fn = (lambda new, old: new > old) if save_best_metric == "mAP" else (lambda new, old: new < old)
+                is_best = metric_improved_fn(current_metric, best_metric_info["value"])
+                
+                if is_best:
+                    best_metric_info["value"] = current_metric
+                    print(f"  *** New best model at step {global_step}! ({save_best_metric}: {current_metric:.4f}) ***")
+                
+                # Save checkpoint
+                metrics = {
+                    "train_loss": total_loss / num_batches if num_batches > 0 else 0.0,
+                    "train_accuracy": total_accuracy / num_batches if num_batches > 0 else 0.0,
+                    "val_loss": val_metrics["loss"],
+                    "val_accuracy": val_metrics["accuracy"],
+                    "val_mAP": val_metrics.get("mAP", 0.0),
+                    "global_step": global_step,
+                }
+                
+                if output_dir is not None:
+                    save_checkpoint(model, optimizer, scheduler, epoch, metrics, output_dir, is_best, save_every=999999)
+                
+                print(f"Val Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}, mAP: {val_metrics.get('mAP', 0.0):.4f}")
+                print("Resuming training...\n")
+                
+                # Return to training mode
+                model.train()
     
     return {
         "loss": total_loss / num_batches,
@@ -425,8 +484,12 @@ def main():
     print(f"Using device: {device}")
     
     # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir) / args.category / timestamp
+    if args.exp_name:
+        exp_dir_name = args.exp_name
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_dir_name = timestamp
+    output_dir = Path(args.output_dir) / args.category / exp_dir_name
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Save config
@@ -449,6 +512,8 @@ def main():
         num_negatives=config["training"]["num_negatives"],
         image_size=config["data"]["image_size"],
         num_workers=args.num_workers,
+        use_augmentation=config["data"].get("use_augmentation", True),
+        augmentation_config=config["data"].get("augmentation"),
     )
     
     print(f"Train samples: {len(train_loader.dataset)}")
@@ -457,20 +522,18 @@ def main():
     # Create model
     print("Creating model...")
     pooling_method = config["model"].get("pooling_method", "softmax_attn")
-    share_weights = config["model"].get("share_weights", False)
     print(f"Using backbone: {config['model']['backbone']}")
     print(f"Pooling method: {pooling_method}")
-    print(f"Share weights: {share_weights}")
     
     model = PatchRetrievalModel(
         model_name=config["model"]["backbone"],
-        share_weights=share_weights,
         pooling_method=pooling_method,
         init_temperature=config["training"]["init_temperature"],
         min_temperature=config["training"]["min_temperature"],
         max_temperature=config["training"]["max_temperature"],
         ordinal_margin_base=config["training"].get("ordinal_margin_base", 0.0),
         cache_dir=config["model"]["cache_dir"],
+        dropout=config["model"].get("dropout", 0.0),
     )
     model = model.to(device)
     
@@ -490,6 +553,8 @@ def main():
     
     # Determine which metric to use for best model
     save_best_metric = config["training"].get("save_best_metric", "loss")
+    val_strategy = config["training"].get("val_strategy", "epoch")
+    
     if save_best_metric == "mAP":
         best_metric_value = 0.0  # Higher is better for mAP
         metric_improved = lambda new, old: new > old
@@ -498,6 +563,9 @@ def main():
         metric_improved = lambda new, old: new < old
     
     print(f"Saving best model based on: {save_best_metric}")
+    print(f"Validation strategy: {val_strategy}")
+    if val_strategy == "step":
+        print(f"  Validate every {config['training'].get('val_every_steps', 500)} steps")
     
     if args.resume:
         print(f"Resuming from checkpoint: {args.resume}")
@@ -515,6 +583,13 @@ def main():
     # TensorBoard writer
     writer = SummaryWriter(output_dir / "tensorboard")
     
+    # Best metric tracking (for step-based validation)
+    best_metric_info = {"value": best_metric_value}
+    
+    # Early stopping tracking
+    early_stopping_patience = config["training"].get("early_stopping_patience", 0)
+    epochs_without_improvement = 0
+    
     # Training loop
     print("\nStarting training...")
     print("=" * 60)
@@ -523,40 +598,73 @@ def main():
         train_metrics = train_epoch(
             model, train_loader, optimizer, scheduler, device, epoch, writer,
             log_every=config["logging"]["log_every"],
+            config=config,
+            val_loader=val_loader if val_strategy == "step" else None,
+            best_metric_info=best_metric_info,
+            output_dir=output_dir if val_strategy == "step" else None,
         )
         
-        val_metrics = validate(model, val_loader, device, epoch, writer, compute_map=True)
-        
-        # Determine if this is the best model
-        if save_best_metric == "mAP":
-            current_metric = val_metrics.get("mAP", 0.0)
+        # Epoch-based validation
+        if val_strategy == "epoch":
+            val_metrics = validate(model, val_loader, device, epoch, writer, compute_map=True)
+            
+            # Determine if this is the best model
+            if save_best_metric == "mAP":
+                current_metric = val_metrics.get("mAP", 0.0)
+            else:
+                current_metric = val_metrics["loss"]
+            
+            is_best = metric_improved(current_metric, best_metric_value)
+            if is_best:
+                best_metric_value = current_metric
+                epochs_without_improvement = 0  # Reset counter
+            else:
+                epochs_without_improvement += 1
+            
+            metrics = {
+                "train_loss": train_metrics["loss"],
+                "train_accuracy": train_metrics["accuracy"],
+                "val_loss": val_metrics["loss"],
+                "val_accuracy": val_metrics["accuracy"],
+                "val_mAP": val_metrics.get("mAP", 0.0),
+            }
+            
+            save_checkpoint(model, optimizer, scheduler, epoch, metrics, output_dir, is_best,
+                            save_every=config["training"].get("save_every", 1))
+            
+            print(f"\nEpoch {epoch} Summary:")
+            print(f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}")
+            print(f"  Val Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}, mAP: {val_metrics.get('mAP', 0.0):.4f}")
+            if is_best:
+                print(f"  *** New best model! ({save_best_metric}: {current_metric:.4f}) ***")
+            else:
+                print(f"  No improvement for {epochs_without_improvement} epoch(s)")
+            
+            # Early stopping check
+            if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
+                print(f"\n!!! Early stopping triggered after {early_stopping_patience} epochs without improvement !!!")
+                print(f"Best {save_best_metric}: {best_metric_value:.4f}")
+                break
+            
+            print()
         else:
-            current_metric = val_metrics["loss"]
-        
-        is_best = metric_improved(current_metric, best_metric_value)
-        if is_best:
-            best_metric_value = current_metric
-        
-        metrics = {
-            "train_loss": train_metrics["loss"],
-            "train_accuracy": train_metrics["accuracy"],
-            "val_loss": val_metrics["loss"],
-            "val_accuracy": val_metrics["accuracy"],
-            "val_mAP": val_metrics.get("mAP", 0.0),
-        }
-        
-        save_checkpoint(model, optimizer, scheduler, epoch, metrics, output_dir, is_best,
-                        save_every=config["training"].get("save_every", 1))
-        
-        print(f"\nEpoch {epoch} Summary:")
-        print(f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}")
-        print(f"  Val Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}, mAP: {val_metrics.get('mAP', 0.0):.4f}")
-        if is_best:
-            print(f"  *** New best model! ({save_best_metric}: {current_metric:.4f}) ***")
-        print()
+            # Step-based validation: just save periodic checkpoints
+            metrics = {
+                "train_loss": train_metrics["loss"],
+                "train_accuracy": train_metrics["accuracy"],
+            }
+            save_checkpoint(model, optimizer, scheduler, epoch, metrics, output_dir, is_best=False,
+                            save_every=config["training"].get("save_every", 1))
+            
+            print(f"\nEpoch {epoch} Summary:")
+            print(f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}")
+            print()
     
     writer.close()
-    print(f"\nTraining complete! Best {save_best_metric}: {best_metric_value:.4f}")
+    
+    # Final best metric value (could be updated during step-based validation)
+    final_best_value = best_metric_info["value"] if val_strategy == "step" else best_metric_value
+    print(f"\nTraining complete! Best {save_best_metric}: {final_best_value:.4f}")
     print(f"Outputs saved to: {output_dir}")
 
 

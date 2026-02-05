@@ -30,12 +30,12 @@ class PatchRetrievalModel(nn.Module):
     def __init__(
         self,
         model_name: str = "openai/clip-vit-base-patch16",
-        share_weights: bool = False,
         pooling_method: str = "softmax_attn",
         init_temperature: float = 0.07,
         min_temperature: float = 0.01,
         max_temperature: float = 1.0,
         ordinal_margin_base: float = 0.0,
+        dropout: float = 0.0,
         cache_dir: str = DEFAULT_CACHE_DIR,
     ):
         """
@@ -43,12 +43,12 @@ class PatchRetrievalModel(nn.Module):
         
         Args:
             model_name: HuggingFace model name for ViT (CLIP, SigLIP2, or DINOv3)
-            share_weights: Whether to share encoder weights
             pooling_method: Method to pool patch similarities ("softmax_attn", "mean", "max")
             init_temperature: Initial temperature for softmax
             min_temperature: Minimum temperature (for clamping)
             max_temperature: Maximum temperature (for clamping)
             ordinal_margin_base: Base margin for ordinal contrastive loss (0.0 to disable)
+            dropout: Dropout rate for regularization (0.0 to disable)
             cache_dir: Directory to cache downloaded model weights
         """
         super().__init__()
@@ -57,7 +57,7 @@ class PatchRetrievalModel(nn.Module):
             raise ValueError(f"pooling_method must be one of {POOLING_METHODS}, got {pooling_method}")
         
         self.pooling_method = pooling_method
-        self.encoder = DualViTEncoder(model_name, share_weights, cache_dir=cache_dir)
+        self.encoder = DualViTEncoder(model_name, cache_dir=cache_dir)
         self.hidden_size = self.encoder.hidden_size
         self.ordinal_margin_base = ordinal_margin_base
         
@@ -68,6 +68,9 @@ class PatchRetrievalModel(nn.Module):
         )
         self.min_temperature = min_temperature
         self.max_temperature = max_temperature
+        
+        # Dropout for regularization
+        self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
         
         # L2 normalization for embeddings
         self.normalize = True
@@ -210,13 +213,16 @@ class PatchRetrievalModel(nn.Module):
         
         # Encode query
         query_embeddings = self.encoder.encode_query(query_images)  # [B, D]
+        query_embeddings = self.dropout(query_embeddings)  # Apply dropout
         
         # Encode positive patches
         pos_patch_embeddings = self.encoder.encode_patches(positive_patches)  # [B, N, D]
+        pos_patch_embeddings = self.dropout(pos_patch_embeddings)  # Apply dropout
         
         # Encode negative patches
         neg_flat = negative_patches.view(B * num_neg, *negative_patches.shape[2:])
         neg_patch_embeddings_flat = self.encoder.encode_patches(neg_flat)  # [B*num_neg, N, D]
+        neg_patch_embeddings_flat = self.dropout(neg_patch_embeddings_flat)  # Apply dropout
         N_patches, D = neg_patch_embeddings_flat.shape[1], neg_patch_embeddings_flat.shape[2]
         neg_patch_embeddings = neg_patch_embeddings_flat.view(B, num_neg, N_patches, D)
         
@@ -270,6 +276,7 @@ class PatchRetrievalModel(nn.Module):
         
         return {
             "loss": loss,
+            "contrastive_loss": loss,
             "accuracy": accuracy,
             "pos_similarity": pos_similarities.mean(),
             "neg_similarity": neg_similarities.mean(),

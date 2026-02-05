@@ -447,7 +447,6 @@ class DualViTEncoder(nn.Module):
     def __init__(
         self,
         model_name: str = "openai/clip-vit-base-patch16",
-        share_weights: bool = False,
         cache_dir: str = DEFAULT_CACHE_DIR,
     ):
         """
@@ -455,7 +454,6 @@ class DualViTEncoder(nn.Module):
         
         Args:
             model_name: HuggingFace model name (CLIP, SigLIP/SigLIP2, or DINOv3)
-            share_weights: Whether to share weights between query and patch encoders
             cache_dir: Directory to cache downloaded model weights
         """
         super().__init__()
@@ -465,14 +463,9 @@ class DualViTEncoder(nn.Module):
         self.is_dinov3 = is_dinov3_model(model_name)
         
         self.query_encoder = create_encoder(model_name, cache_dir=cache_dir)
-        
-        if share_weights:
-            self.patch_encoder = self.query_encoder
-        else:
-            self.patch_encoder = create_encoder(model_name, cache_dir=cache_dir)
+        self.patch_encoder = create_encoder(model_name, cache_dir=cache_dir)
         
         self.hidden_size = self.query_encoder.hidden_size
-        self.share_weights = share_weights
     
     def encode_query(self, query_images: torch.Tensor) -> torch.Tensor:
         """

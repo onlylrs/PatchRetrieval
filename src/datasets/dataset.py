@@ -33,6 +33,8 @@ class CCSRetrievalDataset(Dataset):
         query_image_paths: Optional[list[str]] = None,
         image_size: int = 224,
         num_negatives: int = 7,
+        use_augmentation: bool = True,
+        augmentation_config: Optional[dict] = None,
     ):
         """
         Initialize dataset.
@@ -44,12 +46,15 @@ class CCSRetrievalDataset(Dataset):
             query_image_paths: List of paths to query cell images
             image_size: Size to resize images to
             num_negatives: Number of negative samples per positive
+            use_augmentation: Whether to use augmentation for training queries
+            augmentation_config: Dict with augmentation parameters (rotation_degrees, color_jitter, etc.)
         """
         self.processed_data_dir = Path(processed_data_dir)
         self.category = category
         self.split = split
         self.image_size = image_size
         self.num_negatives = num_negatives
+        self.is_train = (split == "train")
         
         # Load positive and negative patch lists
         cat_dir = self.processed_data_dir / category
@@ -86,12 +91,48 @@ class CCSRetrievalDataset(Dataset):
         # Query image paths (lazy loading, not cached in memory)
         self.query_image_paths = query_image_paths or []
         
+        # Default augmentation config
+        if augmentation_config is None:
+            augmentation_config = {
+                "rotation_degrees": 10,
+                "color_jitter": {"brightness": 0.15, "contrast": 0.15, "saturation": 0.15, "hue": 0.05},
+                "horizontal_flip_prob": 0.3,
+                "vertical_flip_prob": 0.3,
+            }
+        
         # Image transforms
+        # For training: optional strong augmentation on query images to prevent overfitting
+        # For val/test: no augmentation
+        if self.is_train and use_augmentation:
+            transform_list = [
+                transforms.Resize((image_size, image_size)),
+                transforms.RandomRotation(augmentation_config.get("rotation_degrees", 10), fill=255),
+                transforms.ColorJitter(**augmentation_config.get("color_jitter", {})),
+                transforms.RandomHorizontalFlip(p=augmentation_config.get("horizontal_flip_prob", 0.3)),
+                transforms.RandomVerticalFlip(p=augmentation_config.get("vertical_flip_prob", 0.3)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.48145466, 0.4578275, 0.40821073],
+                    std=[0.26862954, 0.26130258, 0.27577711],
+                ),
+            ]
+            self.query_transform = transforms.Compose(transform_list)
+        else:
+            self.query_transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.48145466, 0.4578275, 0.40821073],
+                    std=[0.26862954, 0.26130258, 0.27577711],
+                ),
+            ])
+        
+        # Patch transform (no augmentation for patches)
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
             transforms.Normalize(
-                mean=[0.48145466, 0.4578275, 0.40821073],  # CLIP normalization
+                mean=[0.48145466, 0.4578275, 0.40821073],
                 std=[0.26862954, 0.26130258, 0.27577711],
             ),
         ])
@@ -102,7 +143,7 @@ class CCSRetrievalDataset(Dataset):
     def _load_query(self, path: str) -> torch.Tensor:
         """Load and transform a query image."""
         img = Image.open(path).convert("RGB")
-        return self.transform(img)
+        return self.query_transform(img)
     
     def get_random_query(self) -> torch.Tensor:
         """Get a random query image (dynamically loaded, for training)."""

@@ -271,12 +271,9 @@ def main():
     # Create model
     print("\nLoading model...")
     pooling_method = config["model"].get("pooling_method", "softmax_attn")
-    share_weights = config["model"].get("share_weights", False)
-    print(f"Share weights: {share_weights}")
 
     model = PatchRetrievalModel(
         model_name=config["model"]["backbone"],
-        share_weights=share_weights,
         pooling_method=pooling_method,
         cache_dir=config["model"]["cache_dir"],
     )

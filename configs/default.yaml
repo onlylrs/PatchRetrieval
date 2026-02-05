@@ -3,8 +3,8 @@
 # Data settings
 data:
   # CCS dataset paths
-  cell_cls_root: "/home/rliuar/0_Storage/CCS-Cell-Cls"
-  cell_det_root: "/home/rliuar/0_Storage/CCS-Cell-Det"
+  cell_cls_root: "/home/rliuar/2_Official/CCS-Cell-Cls"
+  cell_det_root: "/home/rliuar/2_Official/CCS-Cell-Det"
   processed_data_dir: "data/derived"
   
   # Root directory for query images
@@ -16,6 +16,17 @@ data:
   # CLIP: 224, SigLIP2-256: 256, SigLIP2-384: 384, DINOv3: 224
   image_size: 224  # resize images to this size for ViT
   
+  # Augmentation settings for query images (only applied during training)
+  use_augmentation: false
+  augmentation:
+    rotation_degrees: 10  # ±degrees for rotation
+    color_jitter:
+      brightness: 0.15
+      contrast: 0.15
+      saturation: 0.15
+      hue: 0.05
+    horizontal_flip_prob: 0.3
+    vertical_flip_prob: 0.3
   
   # Data split (for preprocessing)
   train_ratio: 0.7
@@ -59,18 +70,17 @@ model:
   # Options: "softmax_attn" (attention weighted), "mean" (average), "max" (maximum)
   pooling_method: "softmax_attn"
   
-  # Whether to share weights between Query and Patch encoders
-  # If true, uses a single Siamesse encoder. If false, uses two separate encoders.
-  share_weights: true
+  # Dropout rate for regularization (applied after embeddings)
+  dropout: 0.2
 
 # Training settings
 training:
-  batch_size: 32
+  batch_size: 16
   num_epochs: 10
   learning_rate: 0.00003  # 2e-5
   weight_decay: 0.01
   warmup_epochs: 1
-  num_negatives: 15
+  num_negatives: 31
   
   # Temperature (learnable)
   init_temperature: 0.07
@@ -90,10 +100,19 @@ training:
   scheduler: "cosine"
   
   # Checkpointing
-  save_every: 3
+  save_every: 1  # Save every epoch since we only train 5 epochs
   save_best: true
   # Metric to use for saving best model: "loss" (lower is better) or "mAP" (higher is better)
   save_best_metric: "loss"
+  
+  # Early stopping (optional)
+  early_stopping_patience: 3  # Stop if val loss doesn't improve for 3 validations
+  
+  # Validation strategy
+  # "epoch": Run validation at the end of each epoch
+  # "step": Run validation every N training steps
+  val_strategy: "epoch"  # Changed to epoch for better monitoring
+  val_every_steps: 80  # Only used when val_strategy is "step"
 
 # Logging
 logging:
