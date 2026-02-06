@@ -24,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import yaml
 
-from src.datasets.dataset import CCSRetrievalDataset
+from src.datasets.dataset import CCSRetrievalDataset, CCSEvalDataset
 from src.models.retrieval_model import PatchRetrievalModel
 
 
@@ -96,9 +96,18 @@ def load_config(config_path: str) -> dict:
 def resolve_query_images(
     queries_root: str,
     category: str,
+    split: str = None,
 ) -> list[str]:
     """
     Resolve query image paths from queries_root/category.
+    
+    Args:
+        queries_root: Root directory for query images
+        category: Category name (e.g., "LSIL")
+        split: Optional split name ("train", "val", "test"). If None, loads from {category}/ directly.
+    
+    Returns:
+        List of query image paths
     """
     if not queries_root:
         raise ValueError("queries_root is not specified")
@@ -108,8 +117,13 @@ def resolve_query_images(
     # Check absolute or relative to ROOT_DIR
     if not queries_root.is_absolute():
         queries_root = ROOT_DIR / queries_root
+    
+    # Determine directory based on split
+    if split:
+        category_dir = queries_root / category / split
+    else:
+        category_dir = queries_root / category
         
-    category_dir = queries_root / category
     if not category_dir.exists():
         raise ValueError(f"Query directory not found: {category_dir}")
     
@@ -131,37 +145,49 @@ def resolve_query_images(
 def create_dataloaders(
     processed_data_dir: str,
     category: str,
-    query_images: list[str],
+    train_query_images: list[str],
+    val_query_images: list[str],
     batch_size: int,
     num_negatives: int,
     image_size: int,
     num_workers: int,
+    val_mode: str = "batch",
+    val_batch_size: Optional[int] = None,
     use_augmentation: bool = True,
     augmentation_config: Optional[dict] = None,
 ) -> tuple[DataLoader, DataLoader]:
-    """Create training and validation dataloaders."""
+    """Create training and validation dataloaders with separate query sets."""
     
     train_dataset = CCSRetrievalDataset(
         processed_data_dir=processed_data_dir,
         category=category,
         split="train",
-        query_image_paths=query_images,
+        query_image_paths=train_query_images,
         image_size=image_size,
         num_negatives=num_negatives,
         use_augmentation=use_augmentation,
         augmentation_config=augmentation_config,
     )
     
-    val_dataset = CCSRetrievalDataset(
-        processed_data_dir=processed_data_dir,
-        category=category,
-        split="val",
-        query_image_paths=query_images,
-        image_size=image_size,
-        num_negatives=num_negatives,
-        use_augmentation=False,  # Never augment validation
-        augmentation_config=augmentation_config,
-    )
+    if val_mode == "full":
+        val_dataset = CCSEvalDataset(
+            processed_data_dir=processed_data_dir,
+            category=category,
+            split="val",
+            query_image_paths=val_query_images,
+            image_size=image_size,
+        )
+    else:
+        val_dataset = CCSRetrievalDataset(
+            processed_data_dir=processed_data_dir,
+            category=category,
+            split="val",
+            query_image_paths=val_query_images,
+            image_size=image_size,
+            num_negatives=num_negatives,
+            use_augmentation=False,  # Never augment validation
+            augmentation_config=augmentation_config,
+        )
     
     train_loader = DataLoader(
         train_dataset,
@@ -174,7 +200,7 @@ def create_dataloaders(
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
+        batch_size=val_batch_size or batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
@@ -252,6 +278,9 @@ def train_epoch(
     val_strategy = config.get("training", {}).get("val_strategy", "epoch") if config else "epoch"
     val_every_steps = config.get("training", {}).get("val_every_steps", 500) if config else 500
     save_best_metric = config.get("training", {}).get("save_best_metric", "loss") if config else "loss"
+    val_mode = config.get("training", {}).get("validation_mode", "batch") if config else "batch"
+    if val_mode == "full" and save_best_metric != "mAP":
+        save_best_metric = "mAP"
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
     
@@ -300,7 +329,10 @@ def train_epoch(
         if val_strategy == "step" and val_loader is not None and best_metric_info is not None:
             if global_step > 0 and global_step % val_every_steps == 0:
                 print(f"\n\nRunning validation at step {global_step}...")
-                val_metrics = validate(model, val_loader, device, epoch, writer, compute_map=True)
+                if val_mode == "full":
+                    val_metrics = validate_full_retrieval(model, val_loader, device, epoch, writer)
+                else:
+                    val_metrics = validate(model, val_loader, device, epoch, writer, compute_map=True)
                 
                 # Check if this is the best model
                 current_metric = val_metrics.get("mAP", 0.0) if save_best_metric == "mAP" else val_metrics["loss"]
@@ -315,8 +347,8 @@ def train_epoch(
                 metrics = {
                     "train_loss": total_loss / num_batches if num_batches > 0 else 0.0,
                     "train_accuracy": total_accuracy / num_batches if num_batches > 0 else 0.0,
-                    "val_loss": val_metrics["loss"],
-                    "val_accuracy": val_metrics["accuracy"],
+                    "val_loss": val_metrics.get("loss"),
+                    "val_accuracy": val_metrics.get("accuracy"),
                     "val_mAP": val_metrics.get("mAP", 0.0),
                     "global_step": global_step,
                 }
@@ -324,7 +356,10 @@ def train_epoch(
                 if output_dir is not None:
                     save_checkpoint(model, optimizer, scheduler, epoch, metrics, output_dir, is_best, save_every=999999)
                 
-                print(f"Val Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}, mAP: {val_metrics.get('mAP', 0.0):.4f}")
+                if val_mode == "full":
+                    print(f"Val mAP: {val_metrics.get('mAP', 0.0):.4f}, AUC: {val_metrics.get('auc', 0.0):.4f}")
+                else:
+                    print(f"Val Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}, mAP: {val_metrics.get('mAP', 0.0):.4f}")
                 print("Resuming training...\n")
                 
                 # Return to training mode
@@ -426,6 +461,74 @@ def validate(
     return result
 
 
+@torch.no_grad()
+def validate_full_retrieval(
+    model: nn.Module,
+    val_loader: DataLoader,
+    device: torch.device,
+    epoch: int,
+    writer: SummaryWriter,
+    aggregation: str = "max",
+) -> dict:
+    """Validate with full retrieval over all patches (same protocol as testing)."""
+
+    model.eval()
+
+    all_similarities = []
+    all_labels = []
+
+    query_images = val_loader.dataset.get_all_queries().to(device)
+    num_queries = query_images.shape[0]
+    print(f"Using {num_queries} query image(s) with {aggregation} aggregation for validation")
+
+    query_embeddings = model.encoder.encode_query(query_images)
+
+    for batch in tqdm(val_loader, desc=f"Epoch {epoch} [Val-Full]"):
+        patches = batch["patch"].to(device)
+        labels = batch["label"]
+
+        B = patches.shape[0]
+        patch_embeddings = model.encoder.encode_patches(patches)
+
+        batch_similarities = []
+        for q_idx in range(num_queries):
+            query_emb = query_embeddings[q_idx:q_idx + 1]
+            query_expanded = query_emb.expand(B, -1)
+            sims = model.compute_similarity(query_expanded, patch_embeddings)
+            batch_similarities.append(sims)
+
+        batch_similarities = torch.stack(batch_similarities, dim=0)
+        if aggregation == "max":
+            final_similarities = batch_similarities.max(dim=0).values
+        else:
+            final_similarities = batch_similarities.mean(dim=0)
+
+        all_similarities.append(final_similarities.cpu().float().numpy())
+        all_labels.append(labels.numpy())
+
+    similarities = np.concatenate(all_similarities)
+    labels = np.concatenate(all_labels)
+
+    from src.utils.metrics import compute_retrieval_metrics
+
+    retrieval_metrics = compute_retrieval_metrics(similarities, labels)
+    result = {
+        "mAP": retrieval_metrics.get("mAP", 0.0),
+        "auc": retrieval_metrics.get("auc", 0.0),
+    }
+
+    writer.add_scalar("val/mAP", result["mAP"], epoch)
+    writer.add_scalar("val/auc", result["auc"], epoch)
+
+    for k, v in retrieval_metrics.items():
+        if k.startswith("recall@"): 
+            writer.add_scalar(f"val/{k}", v, epoch)
+        if k.startswith("precision@"): 
+            writer.add_scalar(f"val/{k}", v, epoch)
+
+    return result
+
+
 def save_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -496,22 +599,35 @@ def main():
     with open(output_dir / "config.yaml", "w") as f:
         yaml.dump(config, f)
     
-    # Resolve query images
-    query_images = resolve_query_images(queries_root, args.category)
+    # Resolve query images based on split_queries mode
+    split_queries = config["data"].get("split_queries", False)
     
+    if split_queries:
+        # Split mode: separate train and val queries
+        print("Using split query mode: separate train/val queries")
+        train_query_images = resolve_query_images(queries_root, args.category, split="train")
+        val_query_images = resolve_query_images(queries_root, args.category, split="val")
+    else:
+        # Original mode: same queries for both train and val
+        print("Using original query mode: same queries for train and val")
+        query_images = resolve_query_images(queries_root, args.category, split=None)
+        train_query_images = query_images
+        val_query_images = query_images
     
     # Create dataloaders
-    print("Creating dataloaders...")
-    query_dir = str(Path(query_images[0]).parent)
-    print(f"Query images ({len(query_images)}) from: {query_dir}")
+    print("\nCreating dataloaders...")
+    val_mode = config["training"].get("validation_mode", "batch")
     train_loader, val_loader = create_dataloaders(
         processed_data_dir=processed_data_dir,
         category=args.category,
-        query_images=query_images,
+        train_query_images=train_query_images,
+        val_query_images=val_query_images,
         batch_size=config["training"]["batch_size"],
         num_negatives=config["training"]["num_negatives"],
         image_size=config["data"]["image_size"],
         num_workers=args.num_workers,
+        val_mode=val_mode,
+        val_batch_size=config["training"].get("val_batch_size"),
         use_augmentation=config["data"].get("use_augmentation", True),
         augmentation_config=config["data"].get("augmentation"),
     )
@@ -554,6 +670,10 @@ def main():
     # Determine which metric to use for best model
     save_best_metric = config["training"].get("save_best_metric", "loss")
     val_strategy = config["training"].get("val_strategy", "epoch")
+    if val_mode == "full" and save_best_metric != "mAP":
+        print("Validation mode is full-retrieval. Overriding save_best_metric to mAP.")
+        save_best_metric = "mAP"
+        config["training"]["save_best_metric"] = "mAP"
     
     if save_best_metric == "mAP":
         best_metric_value = 0.0  # Higher is better for mAP
@@ -606,7 +726,10 @@ def main():
         
         # Epoch-based validation
         if val_strategy == "epoch":
-            val_metrics = validate(model, val_loader, device, epoch, writer, compute_map=True)
+            if val_mode == "full":
+                val_metrics = validate_full_retrieval(model, val_loader, device, epoch, writer)
+            else:
+                val_metrics = validate(model, val_loader, device, epoch, writer, compute_map=True)
             
             # Determine if this is the best model
             if save_best_metric == "mAP":
@@ -624,8 +747,8 @@ def main():
             metrics = {
                 "train_loss": train_metrics["loss"],
                 "train_accuracy": train_metrics["accuracy"],
-                "val_loss": val_metrics["loss"],
-                "val_accuracy": val_metrics["accuracy"],
+                "val_loss": val_metrics.get("loss"),
+                "val_accuracy": val_metrics.get("accuracy"),
                 "val_mAP": val_metrics.get("mAP", 0.0),
             }
             
@@ -634,7 +757,10 @@ def main():
             
             print(f"\nEpoch {epoch} Summary:")
             print(f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}")
-            print(f"  Val Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}, mAP: {val_metrics.get('mAP', 0.0):.4f}")
+            if val_mode == "full":
+                print(f"  Val mAP: {val_metrics.get('mAP', 0.0):.4f}, AUC: {val_metrics.get('auc', 0.0):.4f}")
+            else:
+                print(f"  Val Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}, mAP: {val_metrics.get('mAP', 0.0):.4f}")
             if is_best:
                 print(f"  *** New best model! ({save_best_metric}: {current_metric:.4f}) ***")
             else:

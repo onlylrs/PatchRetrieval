@@ -9,7 +9,12 @@ data:
   
   # Root directory for query images
   # Script will look for queries in {queries_root}/{category}/
-  queries_root: "data/queries"
+  queries_root: "data/queries/split"
+  
+  # Query split mode:
+  # false: Use all queries from {queries_root}/{category}/ for both train and val (original mode)
+  # true: Use {queries_root}/{category}/train/ for training, {queries_root}/{category}/val/ for validation
+  split_queries: true
 
   # Image settings
   # Note: Should match the model's expected input size
@@ -75,12 +80,12 @@ model:
 
 # Training settings
 training:
-  batch_size: 16
+  batch_size: 8
   num_epochs: 10
-  learning_rate: 0.00003  # 2e-5
+  learning_rate: 3e-6  # 2e-5
   weight_decay: 0.01
   warmup_epochs: 1
-  num_negatives: 31
+  num_negatives: 63
   
   # Temperature (learnable)
   init_temperature: 0.07
@@ -103,7 +108,7 @@ training:
   save_every: 1  # Save every epoch since we only train 5 epochs
   save_best: true
   # Metric to use for saving best model: "loss" (lower is better) or "mAP" (higher is better)
-  save_best_metric: "loss"
+  save_best_metric: "mAP"
   
   # Early stopping (optional)
   early_stopping_patience: 3  # Stop if val loss doesn't improve for 3 validations
@@ -113,6 +118,12 @@ training:
   # "step": Run validation every N training steps
   val_strategy: "epoch"  # Changed to epoch for better monitoring
   val_every_steps: 80  # Only used when val_strategy is "step"
+  # Validation mode
+  # "batch": in-batch contrastive validation (fast)
+  # "full": full retrieval over val positives/negatives (same as testing)
+  validation_mode: "full"
+  # Optional batch size for full validation
+  # val_batch_size: 64
 
 # Logging
 logging:

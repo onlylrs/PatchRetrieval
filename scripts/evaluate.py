@@ -115,15 +115,29 @@ def resolve_query_images(
     category: str,
     num_queries: int = None,
     seed: int = 42,
+    split: str = None,
 ) -> list[str]:
     """
     Resolve query image paths.
     
-    If query_images is ['all'], load images from queries_dir/{category}/.
+    If query_images is ['all'], load images from queries_dir/{category}/ or queries_dir/{category}/{split}/.
     If num_queries is specified, randomly sample that many images.
+    
+    Args:
+        query_images: List of query image paths or ['all']
+        queries_dir: Root directory for queries
+        category: Category name
+        num_queries: Optional number to randomly sample
+        seed: Random seed for sampling
+        split: Optional split subdirectory (e.g., 'test')
     """
     if len(query_images) == 1 and query_images[0].lower() == "all":
-        category_dir = Path(queries_dir) / category
+        # Determine directory based on split
+        if split:
+            category_dir = Path(queries_dir) / category / split
+        else:
+            category_dir = Path(queries_dir) / category
+            
         if not category_dir.exists():
             raise ValueError(f"Query directory not found: {category_dir}")
         
@@ -238,10 +252,23 @@ def main():
     if queries_dir and not Path(queries_dir).is_absolute():
         queries_dir = str(ROOT_DIR / queries_dir)
     
+    # Check if using split_queries mode
+    split_queries = config["data"].get("split_queries", False)
+    
     # Resolve query images
+    if split_queries:
+        # If split_queries is enabled and user wants 'all', use the test split
+        if len(args.query_images) == 1 and args.query_images[0].lower() == "all":
+            print(f"Split queries mode enabled: using test queries from {queries_dir}/{args.category}/test/")
+            query_split = "test"
+        else:
+            query_split = None
+    else:
+        query_split = None
+    
     query_images = resolve_query_images(
         args.query_images, queries_dir, args.category,
-        num_queries=args.num_queries, seed=42
+        num_queries=args.num_queries, seed=42, split=query_split
     )
     
     # Create dataset and dataloader

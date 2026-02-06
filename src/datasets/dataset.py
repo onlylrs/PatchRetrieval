@@ -255,15 +255,23 @@ class CCSEvalDataset(Dataset):
         self.split = split
         self.image_size = image_size
         
-        # Load all patch names for this split
-        with open(self.processed_data_dir / "splits.json", "r") as f:
-            splits = json.load(f)
-            self.all_patch_names = splits[split]
-        
-        # Load positive patches for labels
+        # Load patch names for this split
         cat_dir = self.processed_data_dir / category
-        with open(cat_dir / f"{split}_positives.json", "r") as f:
-            self.positive_patches = set(json.load(f))
+        pos_file = cat_dir / f"{split}_positives.json"
+        neg_file = cat_dir / f"{split}_negatives.json"
+        if pos_file.exists() and neg_file.exists():
+            with open(pos_file, "r") as f:
+                positives = json.load(f)
+            with open(neg_file, "r") as f:
+                negatives = json.load(f)
+            self.all_patch_names = positives + negatives
+            self.positive_patches = set(positives)
+        else:
+            with open(self.processed_data_dir / "splits.json", "r") as f:
+                splits = json.load(f)
+                self.all_patch_names = splits[split]
+            with open(cat_dir / f"{split}_positives.json", "r") as f:
+                self.positive_patches = set(json.load(f))
         
         # Load patches data for image paths
         with open(self.processed_data_dir / "patches.json", "r") as f:
